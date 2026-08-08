@@ -43,7 +43,8 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => expect(logRequestURLs().length).toBeGreaterThan(initialLogCalls));
-    const query = logRequestURLs().at(-1) ?? "";
+    const requests = logRequestURLs();
+    const query = requests[requests.length - 1] ?? "";
     expect(query).toContain("q=timeout");
     expect(query).toContain("service=billing-service");
     expect(query).toContain("level=error");
