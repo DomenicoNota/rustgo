@@ -1,6 +1,7 @@
 param(
     [string]$ApiBaseUrl = "http://localhost:8080",
     [string]$ApiKey = "",
+    [string]$ExpectedAgentID = "",
     [int]$TimeoutSeconds = 120
 )
 
@@ -10,6 +11,21 @@ $demoDirectory = Join-Path $repoRoot "demo-data"
 $demoLog = Join-Path $demoDirectory "demo.log"
 $token = "logstreamdemo$([Guid]::NewGuid().ToString('N'))"
 $barrierToken = "logstreambarrier$([Guid]::NewGuid().ToString('N'))"
+$composeConfig = $null
+
+function Get-ComposeConfiguration {
+    Push-Location $repoRoot
+    try {
+        $composeJSON = (& docker compose config --format json | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            throw "docker compose config failed with exit code $LASTEXITCODE"
+        }
+        return $composeJSON | ConvertFrom-Json
+    }
+    finally {
+        Pop-Location
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     if (-not [string]::IsNullOrWhiteSpace($env:LOGSTREAM_API_KEY)) {
@@ -19,22 +35,26 @@ if ([string]::IsNullOrWhiteSpace($ApiKey)) {
         $ApiKey = ($env:API_KEYS -split ',')[0].Trim()
     }
     else {
-        Push-Location $repoRoot
-        try {
-            $composeJSON = (& docker compose config --format json | Out-String)
-            if ($LASTEXITCODE -ne 0) {
-                throw "docker compose config failed with exit code $LASTEXITCODE"
-            }
-            $composeConfig = $composeJSON | ConvertFrom-Json
-            $ApiKey = (($composeConfig.services.api.environment.API_KEYS -split ',')[0]).Trim()
-        }
-        finally {
-            Pop-Location
-        }
+        $composeConfig = Get-ComposeConfiguration
+        $ApiKey = (($composeConfig.services.api.environment.API_KEYS -split ',')[0]).Trim()
     }
 }
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     throw "No API key was supplied and none could be resolved from the environment or Compose configuration."
+}
+if ([string]::IsNullOrWhiteSpace($ExpectedAgentID)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOGSTREAM_AGENT_ID)) {
+        $ExpectedAgentID = $env:LOGSTREAM_AGENT_ID
+    }
+    else {
+        if ($null -eq $composeConfig) {
+            $composeConfig = Get-ComposeConfiguration
+        }
+        $ExpectedAgentID = [string]$composeConfig.services.agent.environment.LOGSTREAM_AGENT_ID
+    }
+}
+if ([string]::IsNullOrWhiteSpace($ExpectedAgentID)) {
+    throw "No expected agent ID was supplied and none could be resolved from the environment or Compose configuration."
 }
 $headers = @{ Authorization = "Bearer $ApiKey" }
 
@@ -103,8 +123,8 @@ if ([string]::IsNullOrWhiteSpace($agentEvent.id)) {
 if ($agentEvent.attributes.demo_token -ne $token) {
     throw "Agent did not preserve the structured demo attribute."
 }
-if ($agentEvent.source.agent -ne "docker-demo-agent") {
-    throw "Agent source metadata is missing or incorrect."
+if ($agentEvent.source.agent -ne $ExpectedAgentID) {
+    throw "Agent source metadata is incorrect: expected '$ExpectedAgentID', got '$($agentEvent.source.agent)'."
 }
 
 $duplicate = [ordered]@{
