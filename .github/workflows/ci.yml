@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: logstream_test
+          POSTGRES_USER: logstream
+          POSTGRES_PASSWORD: local-only-example-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U logstream -d logstream_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      kafka:
+        image: apache/kafka:3.9.1
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: backend/go.sum
+      - working-directory: backend
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          test -z "$unformatted" || { printf 'Go files require formatting:\n%s\n' "$unformatted"; exit 1; }
+      - working-directory: backend
+        run: go vet ./...
+      - working-directory: backend
+        env:
+          DATABASE_URL: postgres://logstream:local-only-example-password@localhost:5432/logstream_test?sslmode=disable
+        run: go run ./cmd/migrate
+      - working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgres://logstream:local-only-example-password@localhost:5432/logstream_test?sslmode=disable
+          TEST_KAFKA_BROKERS: localhost:9092
+        run: go test -count=1 ./...
+      - working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgres://logstream:local-only-example-password@localhost:5432/logstream_test?sslmode=disable
+          TEST_KAFKA_BROKERS: localhost:9092
+        run: go test -race -count=1 ./...
+      - working-directory: backend
+        run: go build ./...
+
+  agent-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+      - working-directory: agent
+        run: cargo fmt --check
+      - working-directory: agent
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - working-directory: agent
+        run: cargo test --locked
+
+  dashboard-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - working-directory: dashboard
+        run: npm ci
+      - working-directory: dashboard
+        run: npm audit --audit-level=high
+      - working-directory: dashboard
+        run: npm run format:check
+      - working-directory: dashboard
+        run: npm run lint
+      - working-directory: dashboard
+        run: npm run typecheck
+      - working-directory: dashboard
+        run: npm run test
+      - working-directory: dashboard
+        run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: docker compose config
+      - run: docker compose --profile ui build
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [backend-test, agent-test, dashboard-test, docker-build]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: backend/go.sum
+      - name: Run full infrastructure verification
+        shell: pwsh
+        run: ./scripts/verify-full.ps1 -SkipFastChecks -TimeoutSeconds 240 -StackStartTimeoutSeconds 600
+      - name: Stop test stack
+        if: always()
+        run: docker compose down --volumes

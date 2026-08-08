@@ -1,0 +1,1 @@
+ALTER TABLE logs ALTER COLUMN schema_version DROP DEFAULT;

@@ -1,0 +1,28 @@
+# LOGSTREAM_AGENT_ID, LOGSTREAM_BACKEND_URL, and LOGSTREAM_API_KEY override
+# these local-development values when present in the environment.
+agent_id: "local-dev-agent-1"
+
+backend:
+  url: "http://localhost:8080"
+  api_key: "local-only-example-key"
+  request_timeout_ms: 5000
+
+logs:
+  - service: "demo-service"
+    path: "../demo-data/demo.log"
+    format: "json"
+
+batch:
+  max_size: 100
+  flush_interval_ms: 2000
+
+retry:
+  max_attempts: 5
+  base_delay_ms: 500
+  max_delay_ms: 5000
+  jitter_ratio: 0.2
+
+queue_capacity: 10000
+shutdown_timeout_ms: 10000
+max_line_bytes: 262144
+observability_bind: "127.0.0.1:9090"

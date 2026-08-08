@@ -1,0 +1,10 @@
+.git
+.env
+agent/target
+backend/bin
+backend/coverage.out
+dashboard/node_modules
+dashboard/dist
+.vscode
+.idea
+

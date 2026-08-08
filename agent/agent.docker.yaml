@@ -1,0 +1,26 @@
+agent_id: "docker-demo-agent"
+
+backend:
+  url: "http://api:8080"
+  api_key: ""
+  request_timeout_ms: 5000
+
+logs:
+  - service: "demo-service"
+    path: "/logs/demo.log"
+    format: "json"
+
+batch:
+  max_size: 10
+  flush_interval_ms: 250
+
+retry:
+  max_attempts: 8
+  base_delay_ms: 250
+  max_delay_ms: 5000
+  jitter_ratio: 0.2
+
+queue_capacity: 10000
+shutdown_timeout_ms: 10000
+max_line_bytes: 262144
+observability_bind: "0.0.0.0:9090"

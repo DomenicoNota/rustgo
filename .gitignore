@@ -1,0 +1,28 @@
+.env
+
+# Go
+backend/bin/
+backend/coverage.out
+*.prof
+*.test
+
+# Rust
+agent/target/
+demo-data/*.log
+sample-logs/*.log
+
+# Node
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.vite/
+dashboard/*.tsbuildinfo
+dashboard/vite.*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.local
+*.pem
+*.key

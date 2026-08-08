@@ -1,0 +1,184 @@
+name: ${COMPOSE_PROJECT_NAME:-logstream}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-logstream}
+      POSTGRES_USER: ${POSTGRES_USER:-logstream}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-example-password}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-logstream} -d $${POSTGRES_DB:-logstream}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.9.1
+    ports:
+      - "127.0.0.1:29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  kafka-init:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-logs.raw}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC:-logs.dlq}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic "$${KAFKA_TOPIC}" --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic "$${KAFKA_DLQ_TOPIC}" --partitions 1 --replication-factor 1
+    restart: "no"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://logstream:local-only-example-password@postgres:5432/logstream?sslmode=disable}
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-10}
+      DB_MIN_CONNS: ${DB_MIN_CONNS:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: api
+    environment:
+      PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://logstream:local-only-example-password@postgres:5432/logstream?sslmode=disable}
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-10}
+      DB_MIN_CONNS: ${DB_MIN_CONNS:-1}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-logs.raw}
+      API_KEYS: ${API_KEYS:-local-only-example-key}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-500}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-2097152}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        SERVICE: worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://logstream:local-only-example-password@postgres:5432/logstream?sslmode=disable}
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-10}
+      DB_MIN_CONNS: ${DB_MIN_CONNS:-1}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-logs.raw}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC:-logs.dlq}
+      KAFKA_GROUP_ID: ${KAFKA_GROUP_ID:-logstream-persistence}
+      WORKER_RETRY_MAX_ATTEMPTS: ${WORKER_RETRY_MAX_ATTEMPTS:-5}
+      WORKER_RETRY_BASE_DELAY_MS: ${WORKER_RETRY_BASE_DELAY_MS:-250}
+      WORKER_RETRY_MAX_DELAY_MS: ${WORKER_RETRY_MAX_DELAY_MS:-5000}
+      WORKER_ATTEMPT_TIMEOUT_MS: ${WORKER_ATTEMPT_TIMEOUT_MS:-10000}
+      WORKER_OBSERVABILITY_PORT: ${WORKER_OBSERVABILITY_PORT:-9091}
+    ports:
+      - "127.0.0.1:${WORKER_OBSERVABILITY_PORT:-9091}:${WORKER_OBSERVABILITY_PORT:-9091}"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:$${WORKER_OBSERVABILITY_PORT:-9091}/readyz >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 15s
+
+  agent:
+    build:
+      context: ./agent
+    environment:
+      LOGSTREAM_AGENT_ID: ${LOGSTREAM_AGENT_ID:-local-dev-agent-1}
+      LOGSTREAM_BACKEND_URL: http://api:8080
+      LOGSTREAM_API_KEY: ${LOGSTREAM_API_KEY:-local-only-example-key}
+      LOGSTREAM_OBSERVABILITY_BIND: 0.0.0.0:9090
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./demo-data:/logs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 15s
+
+  dashboard:
+    profiles: ["ui"]
+    build:
+      context: ./dashboard
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5173').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 15s
+
+volumes:
+  postgres-data:
